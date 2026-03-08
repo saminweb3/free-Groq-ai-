@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Free AI Chat – Groq Backend</title>
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+  <script src="https://unpkg.com/@phosphor-icons/web"></script>
+  <style>
+    :root {
+      --bg: #0f0f17;
+      --msg-user: #2563eb;
+      --msg-bot: #1e293b;
+    }
+    body {
+      background: var(--bg);
+      color: #e2e8f0;
+    }
+    .message-user {
+      background: var(--msg-user);
+    }
+    .message-bot {
+      background: var(--msg-bot);
+    }
+    #messages::-webkit-scrollbar {
+      width: 6px;
+    }
+    #messages::-webkit-scrollbar-thumb {
+      background: #334155;
+      border-radius: 3px;
+    }
+  </style>
+</head>
+<body class="min-h-screen flex flex-col">
+
+  <header class="border-b border-gray-800 bg-gray-950/70 backdrop-blur-sm p-3 flex items-center gap-3">
+    <i class="ph ph-robot text-blue-400 text-2xl"></i>
+    <h1 class="font-semibold text-lg">Free AI Chat (Groq)</h1>
+  </header>
+
+  <main id="messages" class="flex-1 overflow-y-auto p-4 space-y-5 pb-24">
+    <!-- messages appear here -->
+  </main>
+
+  <footer class="border-t border-gray-800 bg-gray-950/80 backdrop-blur p-4 fixed bottom-0 left-0 right-0">
+    <form id="chat-form" class="max-w-4xl mx-auto flex gap-3">
+      <input
+        id="user-input"
+        type="text"
+        autocomplete="off"
+        placeholder="Ask anything..."
+        class="flex-1 bg-gray-900 border border-gray-700 rounded-xl px-5 py-3 text-white placeholder-gray-500 focus:outline-none focus:border-blue-500 transition-colors"
+      />
+      <button
+        type="submit"
+        id="send-btn"
+        class="bg-blue-600 hover:bg-blue-700 px-6 rounded-xl flex items-center justify-center transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+      >
+        <i class="ph ph-paper-plane-tilt text-lg"></i>
+      </button>
+    </form>
+  </footer>
+
+  <script>
+    const form = document.getElementById('chat-form');
+    const input = document.getElementById('user-input');
+    const messages = document.getElementById('messages');
+    const sendBtn = document.getElementById('send-btn');
+
+    // ────────────────────────────────────────────────
+    //   ⚠️  Replace with YOUR real free API key
+    // ────────────────────────────────────────────────
+    const GROQ_API_KEY = "gsk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
+
+    // You can also try these models (change only the model name):
+    // • gemma2-27b-it
+    // • llama-3.1-70b-versatile
+    // • llama-3.1-8b-instant     ← very fast & cheap
+    // • mixtral-8x7b-32768
+    const MODEL = "gemma2-27b-it";
+
+    let abortController = null;
+
+    function addMessage(role, content, isLoading = false) {
+      const div = document.createElement('div');
+      div.className = `flex ${role === 'user' ? 'justify-end' : 'justify-start'} message-fade-in`;
+
+      const bubble = document.createElement('div');
+      bubble.className = `max-w-[85%] rounded-2xl px-5 py-3 ${
+        role === 'user' ? 'message-user text-white' : 'message-bot'
+      }`;
+
+      if (isLoading) {
+        bubble.innerHTML = `<div class="flex items-center gap-2">
+          <i class="ph ph-circle-notch animate-spin text-lg"></i>
+          Thinking...
+        </div>`;
+      } else {
+        bubble.textContent = content;
+        // Simple markdown-like → line breaks
+        bubble.innerHTML = bubble.innerHTML.replace(/\n/g, '<br>');
+      }
+
+      div.appendChild(bubble);
+      messages.appendChild(div);
+      messages.scrollTop = messages.scrollHeight;
+      return bubble; // return so we can stream into it later
+    }
+
+    async function streamResponse(userMessage) {
+      const assistantBubble = addMessage('assistant', '', true);
+
+      if (abortController) abortController.abort();
+      abortController = new AbortController();
+
+      try {
+        const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${GROQ_API_KEY}`,
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            model: MODEL,
+            messages: [
+              { role: "system", content: "You are a helpful, concise and slightly humorous assistant. Current date: March 2026." },
+              { role: "user", content: userMessage }
+            ],
+            temperature: 0.7,
+            max_tokens: 2048,
+            stream: true
+          }),
+          signal: abortController.signal
+        });
+
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        let displayedText = "";
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+
+          let lines = buffer.split("\n");
+          buffer = lines.pop(); // last incomplete line
+
+          for (const line of lines) {
+            if (line.trim() === "") continue;
+            if (line.startsWith("data: ")) {
+              const data = line.slice(6);
+              if (data === "[DONE]") continue;
+
+              try {
+                const parsed = JSON.parse(data);
+                const delta = parsed.choices?.[0]?.delta?.content;
+                if (delta) {
+                  displayedText += delta;
+                  assistantBubble.innerHTML = displayedText.replace(/\n/g, '<br>');
+                  messages.scrollTop = messages.scrollHeight;
+                }
+              } catch {}
+            }
+          }
+        }
+
+        // final flush
+        if (buffer) {
+          // very rare case — handle similarly
+        }
+
+      } catch (err) {
+        if (err.name !== 'AbortError') {
+          assistantBubble.textContent = "Error: " + (err.message || "Could not connect to AI");
+        }
+      } finally {
+        abortController = null;
+      }
+    }
+
+    form.addEventListener('submit', async e => {
+      e.preventDefault();
+      const text = input.value.trim();
+      if (!text) return;
+
+      addMessage('user', text);
+      input.value = "";
+      sendBtn.disabled = true;
+
+      await streamResponse(text);
+
+      sendBtn.disabled = false;
+      input.focus();
+    });
+
+    // allow pressing Enter (without shift) to send
+    input.addEventListener('keydown', e => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        form.dispatchEvent(new Event('submit'));
+      }
+    });
+
+    // welcome message
+    addMessage('assistant', "Hey! I'm running on Groq's free tier — ask me anything 😄");
+  </script>
+
+</body>
+</html>
